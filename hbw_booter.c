@@ -39,7 +39,7 @@
                                         Geraet OHNE laufende App abgefragt wird; die App meldet sonst ihren
                                         eigenen Typ. Fuers Flashen (Adresse kommt aus dem EEPROM) egal. */
 #define HW_VERSION   0x00
-#define FW_VERSION   0x0004          /* Booter-eigene Version, gemeldet bei 'v'. 0x0003: RAM-Marker (bootmagic.h) */
+#define FW_VERSION   0x0004          /* Booter-eigene Version, gemeldet bei 'v'. 0x0004: optionaler Konfig Taster (USE_BUTTON = 1) */
 #define FALLBACK_ADDR 0x42FFFFFFUL   /* falls EEPROM-Adresse leer (0xFFFFFFFF) */
 
 /* Inaktivitaets-Timeout: nach IDLE_TIMEOUT_OVF Timer1-Ueberlaeufen (je ~4,19 s
@@ -95,19 +95,22 @@
  *   328P      : ADC6 = Arduino (analogRead A6)
  *   328PB     : PE2 = Arduino A6
  *   32A/644P/1284P : PB0 = Arduino-Pin 8 (MightyCore-Standard ???) - TODO: ueberpruefen & testen
- * Aktiv LOW; USE_BUTTON 0 = Konfig Taster im Booter nicht genutzt. */
-#define USE_BUTTON         1
+ * Aktiv LOW; USE_BUTTON 0 = Konfig Taster im Booter nicht genutzt. 1 = nutzbar */
+#define USE_BUTTON         0
 #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)
   #define BUTTON_DDR DDRC               /* nicht benutzt bei ADC */
-  #define BUTTON_PIN PINC               /* nicht benutzt bei ADC */
+  #define BUTTON_PORT PINC               /* nicht benutzt bei ADC */
+  #define BUTTON_PIN PORTC               /* nicht benutzt bei ADC */
   #define BUTTON_ADC_ONLY
   #define BUTTON_BIT  6                 /* ADC6 */
 #elif defined(__AVR_ATmega328PB__)
   #define BUTTON_DDR  DDRE
+  #define BUTTON_PORT PORTE
   #define BUTTON_PIN PINE
   #define BUTTON_BIT  2                 /* PE2 / PINE2 */
 #else
   #define BUTTON_DDR  DDRB
+  #define BUTTON_PORT PORTB
   #define BUTTON_PIN PINB
   #define BUTTON_BIT  4                 /* PB4 */
 #endif
@@ -375,7 +378,7 @@ static void ledSet(uint8_t on){
 /* Config-Taster gedrueckt halten beim reset, zum erzwingen des booters */
 static uint8_t configPressed(void){
 #if USE_BUTTON
- #if defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__) && defined BUTTON_ADC_ONLY && BUTTON_BIT >= 6
+ #if (defined(__AVR_ATmega328P__) || defined(__AVR_ATmega328__)) && defined BUTTON_ADC_ONLY && BUTTON_BIT >= 6
 /* Config-Taster an ADC6 oder 7 abfragen (analog only ports ADC6 & 7, kein digitales IO) */
   ADMUX  = (1<<REFS0) | BUTTON_BIT;                                  /* AVcc, Kanal ADC6 */
   ADCSRA = (1<<ADEN)|(1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0);      /* ADC an, /128 */
@@ -387,6 +390,8 @@ static uint8_t configPressed(void){
  #else
   // IO port nutzen
   BUTTON_DDR &= ~(1<<BUTTON_BIT);        /* IO als Eingang setzen (zur Sicherheit falls es kein komplett reset war) */
+  BUTTON_PORT |=  (1<<BUTTON_BIT);   /* interner Pull-up */
+  _delay_us(10);                     /* einschwingen lassen */
   return !(BUTTON_PIN & (1<<BUTTON_BIT));
  #endif
 #else
