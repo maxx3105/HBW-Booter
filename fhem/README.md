@@ -91,6 +91,47 @@ bzw. `error: …`).
 * Ein Gerät im Booter-Modus beantwortet **keine Discovery** — die Zieladresse muss bekannt sein.
 * Am Bus lässt sich Booter vs. App an der Announce unterscheiden: **devType `0x00` = Booter**.
 
+## eQ-3-Originalgeräte
+
+Das Wire-Protokoll ist dasselbe, und die Firmware der HMW-Module liegt als **normales Intel-HEX**
+vor (verschlüsselt sind nur die `.eq3`-Container für Gateway/Coprozessor). Es fehlt nur ein Detail:
+
+**hs485d spricht einen Bootloader mit einem anderen Control-Byte an als eine laufende App:**
+
+| | Control | Senderadresse |
+|---|---|---|
+| App (`CTRL_IFRAME`) | `0x18` | ja |
+| Bootloader (`CTRL_BOOT_IFRAME`) | `0x10` | **nein** |
+
+Der eQ-3-Bootloader akzeptiert **nur `0x10`** und verwirft alles mit Senderadresse kommentarlos.
+Das typische Fehlerbild: `u` **und** `p` werden quittiert, aber es kommt nie eine Blockgröße —
+denn diese ACKs stammen noch von der laufenden **App**, die jedes adressierte Frame generisch
+bestätigt. Ein ACK ist also **kein** Beleg dafür, dass der Bootloader läuft.
+
+Umschalten (im FHEM-Eingabefeld, ohne Modul-Änderung):
+
+```perl
+{ $main::HM485_fwu_bootCtrl = '10' }
+```
+
+Das betrifft nur die Bootloader-Phase (2. `u`, `p`, `w`, `r`, `g`); `z z`, das erste `u` an die App
+und `Z Z` bleiben unverändert. Die Blockgröße (**128 B** beim ATmega32A statt 64) kommt automatisch
+aus der `p`-Antwort.
+
+⚠️ **Nicht mit älteren HBW-Bootern kombinieren:** Unser Booter versteht `0x10` erst **ab FW `0x0005`**.
+Frühere Versionen leiten „hat Sender" auch aus Bit 4 ab und würden in einem senderlosen Frame vier
+Sender-Bytes suchen. Deshalb ist `'18'` der Default.
+
+Weitere Punkte für eQ-3-Geräte:
+
+* Der eQ-3-Bootloader **fällt nach ~4–5 s ohne Kommando in die App zurück** — zügig arbeiten.
+* Am Sniffer erkennbar: Bootloader-Antworten gehen an Ziel **`00000000`** (senderloses Frame → das
+  Gerät weiß nicht, wer gefragt hat), App-ACKs an `00000001`/CCU.
+* Nicht brickbar: Der Bootloader liegt ab `0x7800`, das Image endet bei `0x77FF`.
+
+Getestet wurde der Weg bisher **außerhalb** von FHEM (direkt am Bus, HMW-LC-Bl1-DR: `p` → `00 80`,
+`r` → 128 Byte bit-genau). Der Weg über dieses Modul steht noch aus.
+
 ## Danksagung
 
 Dieses Modul gäbe es ohne **[loetmeister](https://github.com/loetmeister)** nicht. Er hat es an 
