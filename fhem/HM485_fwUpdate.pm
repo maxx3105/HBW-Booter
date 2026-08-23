@@ -44,6 +44,19 @@ use constant {
     FWU_RESET_PAUSE  => 1.2,    # Reset-Pause zwischen u(App) und u(Booter); flash_tool: sleep(1.5)
 };
 
+# Control-Byte fuer die BOOTER-Kommandos (alles ab dem 2. 'u': u/p/w/r/g).
+#   '18' = CTRL_IFRAME     -- mit Senderadresse (wie an eine laufende App)
+#   '10' = CTRL_BOOT_IFRAME -- OHNE Senderadresse; so spricht hs485d/die CCU jeden Bootloader an
+# Der **eq3-Original-Booter akzeptiert NUR 0x10** und verwirft alles mit Sender kommentarlos
+# (Symptom: ACK auf 'u' und 'p', aber nie eine Blockgroesse -- das ACK kommt dann noch von der
+# laufenden App, die jedes adressierte Frame generisch quittiert).
+# Unser HBW-Booter versteht 0x10 erst **ab FW 0x0005** (davor: hasSender aus Bit 4 mitabgeleitet,
+# er wuerde in einem senderlosen Frame vier Sender-Bytes suchen und es verwerfen).
+# Default '18' = kompatibel zu allen bisher ausgelieferten HBW-Bootern.
+# Umschalten zur Laufzeit ohne Modul-Aenderung, im FHEM-Eingabefeld:
+#   { $main::HM485_fwu_bootCtrl = '10' }
+our $HM485_fwu_bootCtrl = '18';
+
 # ----------------------------------------------------------------------------
 #  Intel-HEX -> zusammenhaengendes Byte-Array [0..maxAddr], Luecken = 0xFF.
 #  1:1-Port von flash_tool.py::parse_hex (Rec-Typen 00=data, 04=ext-lin, 02=ext-seg).
@@ -134,11 +147,11 @@ sub HM485_fwu_Step {
         # 2. u -> jetzt antwortet der BOOTER (ACK + StartupReason). "wie hs485d" (u zweimal).
         # (flash_tool.py verzichtet auf das 2. u und lauscht nur passiv -- die CCU/hs485d
         #  schickt es aber, und unser Booter beantwortet es: CMD_START_BOOTER-Case.)
-        HM485_fwu_sendAcked($hash, $dev, '75');
+        HM485_fwu_sendAcked($hash, $dev, '75', $HM485_fwu_bootCtrl);
     }
     elsif ($st == FWU_PSIZE) {
         # p -> Booter meldet Blockgroesse als ACK-Frame [00 size]. flash_tool.py:123 [0x70]
-        HM485_fwu_sendAcked($hash, $dev, '70');
+        HM485_fwu_sendAcked($hash, $dev, '70', $HM485_fwu_bootCtrl);
     }
     elsif ($st == FWU_WRITE) {
         # w-Schleife: bs-Byte-Bloecke. Page 0 (base < 128) ZULETZT -- so bleibt der
@@ -165,7 +178,7 @@ sub HM485_fwu_Step {
         # w:  77 baseHi baseLo n <n Datenbytes>
         my $pl = sprintf('77%02X%02X%02X', ($base >> 8) & 0xFF, $base & 0xFF, $n)
                . join('', map { sprintf('%02X', $fu->{img}[$base + $_]) } (0 .. $n - 1));
-        HM485_fwu_sendAcked($hash, $dev, $pl);
+        HM485_fwu_sendAcked($hash, $dev, $pl, $HM485_fwu_bootCtrl);
     }
     elsif ($st == FWU_VERIFY) {
         # r-Schleife: Flash zuruecklesen + gegen das Image pruefen (normale Reihenfolge).
@@ -180,7 +193,8 @@ sub HM485_fwu_Step {
         my $n    = ($base + $bs <= $fu->{maxA} + 1) ? $bs : ($fu->{maxA} + 1 - $base);
         # r:  72 baseHi baseLo n   -> Booter antwortet mit GENAU n Flash-Bytes (kein Echo)
         HM485_fwu_sendAcked($hash, $dev,
-            sprintf('72%02X%02X%02X', ($base >> 8) & 0xFF, $base & 0xFF, $n));
+            sprintf('72%02X%02X%02X', ($base >> 8) & 0xFF, $base & 0xFF, $n),
+            $HM485_fwu_bootCtrl);
     }
     elsif ($st == FWU_GO) {
         # g:  67 lenHi lenLo crcHi crcLo  -- Booter prueft appCrc ueber die ganze App und
@@ -189,7 +203,8 @@ sub HM485_fwu_Step {
         my $len = $fu->{maxA} + 1;
         my $crc = HM485_fwu_appcrc($fu->{img});
         HM485_fwu_sendAcked($hash, $dev, sprintf('67%02X%02X%02X%02X',
-            ($len >> 8) & 0xFF, $len & 0xFF, ($crc >> 8) & 0xFF, $crc & 0xFF));
+            ($len >> 8) & 0xFF, $len & 0xFF, ($crc >> 8) & 0xFF, $crc & 0xFF),
+            $HM485_fwu_bootCtrl);
     }
     elsif ($st == FWU_UNLOCK) {
         # Z Z -- Zero-Communication aufheben (Broadcast, ohne ACK). flash_tool.py:179-181.
@@ -316,14 +331,17 @@ sub HM485_fwu_Fail {
 # Unicast + auf ACK/Response warten: IOWrite liefert die requestId; Response-Zuordnung
 # aber ueber den State (s.o.). $payloadHex = Bus-Nutzdaten ab Kommando-Byte, z.B. '75'.
 sub HM485_fwu_sendAcked {
-    my ($hash, $target, $payloadHex) = @_;
+    my ($hash, $target, $payloadHex, $ctrl) = @_;
+    # $ctrl optional: Booter-Kommandos brauchen ggf. CTRL_BOOT_IFRAME (siehe $HM485_fwu_bootCtrl).
+    my %p = (target => $target, data => $payloadHex);
+    $p{ctrl} = $ctrl if defined $ctrl;
     # IOWrite MUSS das DEVICE-hash bekommen (FHEM findet ->{IODev} selbst) -- NICHT das
     # IO-hash: exakt wie HM485_DoSendCommand (IOWrite($hash, HM485::CMD_SEND, {target,data})).
     # Mit dem IO-hash sucht IOWrite dessen ->{IODev} (gibt es nicht) -> Frame wird verworfen.
     # Rueckgabe = msgId dieses Frames; die Antwort traegt dieselbe -> Zuordnung in OnResp.
     # Erst in eine Variable, dann zuweisen: ein direktes $hash->{fwu}{reqId} = IOWrite(...)
     # wuerde {fwu} per Autovivification NEU anlegen, falls der Lauf zwischendrin beendet wurde.
-    my $rid = IOWrite($hash, HM485::CMD_SEND, { target => $target, data => $payloadHex });
+    my $rid = IOWrite($hash, HM485::CMD_SEND, \%p);
     return unless $hash->{fwu};
     $hash->{fwu}{reqId} = $rid;
     RemoveInternalTimer($hash, 'HM485_fwu_Timeout');
